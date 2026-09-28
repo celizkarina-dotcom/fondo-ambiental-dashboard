@@ -17,6 +17,25 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog"
 
+/** Mayúsculas, sin tildes ni espacios sobrantes: para comparar nombres. */
+function normalizeName(value: string | null | undefined) {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toUpperCase()
+}
+
+/** Igual que normalizeName, unificando las variantes conocidas de departamentos. */
+function normalizeDepartment(value: string | null | undefined) {
+  const name = normalizeName(value)
+  if (["PTE ROQUE S PENA", "ROQUE SAENZ PENA", "PRESIDENTE ROQUE SAENZ PENA"].includes(name)) {
+    return "PRESIDENTE ROQUE SAENZ PENA"
+  }
+  return name
+}
+
 type Props = {
   trigger: ReactNode
   record?: FundRecord
@@ -49,13 +68,39 @@ export function RecordDialog({
   const isEdit = Boolean(record)
 
   // Indice por localidad para completar departamento y coordenadas automaticamente.
+  // Cada localidad pertenece a un solo departamento.
   const byMunicipality = useMemo(() => {
     const map = new Map<string, FundRecord>()
     for (const r of allRecords) {
-      if (!map.has(r.municipio)) map.set(r.municipio, r)
+      const key = normalizeName(r.municipio)
+      if (key && !map.has(key)) map.set(key, r)
     }
     return map
   }, [allRecords])
+
+  // Si ya se eligió un departamento conocido, la lista sugiere solo sus localidades.
+  const suggestedMunicipalities = useMemo(() => {
+    const dep = normalizeDepartment(departamento)
+    const known = allRecords.some((r) => normalizeDepartment(r.departamento) === dep)
+    if (!dep || !known) return municipalityOptions
+    return municipalityOptions.filter((m) => {
+      const match = byMunicipality.get(normalizeName(m))
+      return !match || normalizeDepartment(match.departamento) === dep
+    })
+  }, [departamento, allRecords, municipalityOptions, byMunicipality])
+
+  /** Devuelve el departamento correcto si la localidad ya existe en otro departamento. */
+  function departmentConflict(): string | null {
+    const key = normalizeName(municipio)
+    if (!key) return null
+    const other = allRecords.find(
+      (r) =>
+        r.id !== record?.id &&
+        normalizeName(r.municipio) === key &&
+        normalizeDepartment(r.departamento) !== normalizeDepartment(departamento),
+    )
+    return other ? other.departamento : null
+  }
 
   useEffect(() => {
     if (!open) return
@@ -70,17 +115,26 @@ export function RecordDialog({
   function handleMunicipioChange(value: string) {
     setMunicipio(value)
 
-    const match = byMunicipality.get(value.trim().toUpperCase())
+    const match = byMunicipality.get(normalizeName(value))
     if (!match) return
 
-    // Completa lo que el usuario todavia no cargo, sin sobreescribir lo escrito.
-    if (!departamento) setDepartamento(match.departamento)
+    // El departamento se fija siempre con el de la localidad (no puede ser otro).
+    setDepartamento(match.departamento)
+    // El resto se completa solo si todavia no se cargo.
     if (!regionalEntity && match.regional_entity) setRegionalEntity(match.regional_entity)
     if (!lat && match.lat != null) setLat(String(match.lat))
     if (!lng && match.lng != null) setLng(String(match.lng))
   }
 
   async function handleSubmit(formData: FormData) {
+    const correctDepartment = departmentConflict()
+    if (correctDepartment) {
+      setError(
+        `La localidad ${municipio.trim().toUpperCase()} pertenece al departamento ${correctDepartment}. Corregí el departamento o la localidad.`,
+      )
+      return
+    }
+
     setPending(true)
     setError(null)
 
@@ -144,7 +198,7 @@ export function RecordDialog({
                 autoComplete="off"
               />
               <datalist id="fa-municipios">
-                {municipalityOptions.map((m) => (
+                {suggestedMunicipalities.map((m) => (
                   <option key={m} value={m} />
                 ))}
               </datalist>
